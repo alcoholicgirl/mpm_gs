@@ -1,0 +1,8 @@
+__pycache__/
+assets/
+frames/
+*.mp4
+
+.claude
+.venv
+.zsh_history
