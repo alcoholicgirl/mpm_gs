@@ -1,0 +1,16 @@
+[project]
+name = "mpm-gs"
+version = "0.1.0"
+description = "GPU-accelerated Material Point Method simulator for Gaussian Splatting"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "taichi>=1.7.0",
+    "numpy>=1.24",
+    "plyfile>=0.9",
+    "opencv-python>=4.8",
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4",
+    "Pillow>=10.0",
+    "torch>=2.10.0",
+]
