@@ -1,26 +1,5 @@
 """
-Gaussian-kernel MPM solver — standard PIC (no APIC).
-
-Interpolation kernel:
-    w_ij = G_i(x_j) / Z_i
-    G_i(x) = exp(-½ (x-xp)ᵀ Σ⁻¹ (x-xp))
-    Z_i    = Σ_j G_i(x_j)
-
-Kernel gradient (used for elastic forces and ∇v):
-    ∇_{xj} w_ij = w_ij · (-Σ⁻¹ d)   where d = xj - xp
-    ∇_{xp} w_ij = w_ij · ( Σ⁻¹ d)
-
-P2G momentum:
-    grid_mv[j] += w · m_p · v_p  +  dt · V_p · w · (σ · Σ⁻¹) · d
-
-G2P velocity:
-    v_p = Σ_j w_ij · grid_v[j]
-
-Velocity gradient for F update:
-    ∇v_p = Σ_j w_ij · grid_v[j] ⊗ (Σ⁻¹ · d)
-
-Particle volume (README):
-    V_i = (2π)^{3/2} √det(Σ_i) = (2π)^{3/2} s₀ s₁ s₂
+Gaussian-kernel MPM solver
 """
 
 import numpy as np
@@ -78,12 +57,14 @@ class MPMSolver:
         cloud: GaussianCloud,
         scene_scale: float = 1.0,
         scene_offset: np.ndarray | None = None,
+        kernel_scale: float = 1.0,
     ):
         pos = cloud.positions.copy().astype(np.float32)
         if scene_offset is None:
             scene_offset = pos.mean(axis=0)
         pos -= scene_offset
-        max_extent = np.abs(pos).max()
+        # max_extent = np.abs(pos).max()
+        max_extent = float(np.percentile(np.abs(pos), 99)) 
         if max_extent > 0:
             pos /= max_extent * 2.0 / scene_scale
         pos += 0.5
@@ -122,7 +103,7 @@ class MPMSolver:
             .astype(np.float32)
         )
 
-        s = np.maximum(cloud.scales.astype(np.float32) * w2g, 1.0 * self.dx)
+        s = np.maximum(cloud.scales.astype(np.float32) * w2g * kernel_scale, 1.0 * self.dx)
         inv_s2 = 1.0 / s**2
         inv_cov = np.einsum("nij,nj,nkj->nik", R, inv_s2, R).astype(np.float32)
 

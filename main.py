@@ -1,9 +1,5 @@
 """
 mpm-gs: GPU-accelerated MPM simulator for 3D Gaussian Splatting.
-
-Usage:
-    uv run python main.py --ply assets/ficus.ply
-    uv run python main.py --ply assets/ficus.ply --frames 300 --video output.mp4
 """
 
 import argparse
@@ -35,6 +31,8 @@ def parse_args():
     p.add_argument("--no_sim",        action="store_true", help="Render only, skip MPM")
     p.add_argument("--opacity_thresh", type=float, default=0.0,
                    help="Discard Gaussians with opacity below this value (0–1)")
+    p.add_argument("--kernel_scale",  type=float, default=1.0,
+                   help="Sim kernel size relative to render kernel (0–1, smaller → less phantom collision)")
     return p.parse_args()
 
 
@@ -79,8 +77,9 @@ def main():
             dt=args.dt,
             youngs_modulus=args.youngs,
             poisson_ratio=args.poisson,
+            
         )
-        solver.init_from_cloud(cloud, scene_scale=0.8)
+        solver.init_from_cloud(cloud, scene_scale=0.8, kernel_scale=args.kernel_scale)
 
     exporter = VideoExporter(out_dir=args.out_dir, fps=args.fps)
 
