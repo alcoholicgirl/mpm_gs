@@ -32,7 +32,9 @@ def parse_args():
     p.add_argument("--youngs",   type=float, default=1e5)
     p.add_argument("--poisson",  type=float, default=0.3)
     p.add_argument("--gpu",      action="store_true", help="Use Metal/CUDA backend")
-    p.add_argument("--no_sim",   action="store_true", help="Render only, skip MPM")
+    p.add_argument("--no_sim",        action="store_true", help="Render only, skip MPM")
+    p.add_argument("--opacity_thresh", type=float, default=0.0,
+                   help="Discard Gaussians with opacity below this value (0–1)")
     return p.parse_args()
 
 
@@ -63,8 +65,9 @@ def main():
         ti.init(arch=ti.cpu)
 
     print(f"Loading {args.ply} ...")
-    cloud = load_ply(args.ply)
-    print(f"  {len(cloud)} Gaussians")
+    cloud = load_ply(args.ply, opacity_threshold=args.opacity_thresh)
+    print(f"  {len(cloud)} Gaussians" +
+          (f"  (opacity ≥ {args.opacity_thresh})" if args.opacity_thresh > 0 else ""))
     cam = make_scene_camera(cloud, args.width, args.height, args.fovx_deg)
     renderer = GaussianRenderer(args.width, args.height, max_gaussians=len(cloud))
 

@@ -27,7 +27,7 @@ def _sh_dc_to_rgb(sh_dc: np.ndarray) -> np.ndarray:
     return np.clip(sh_dc * SH_C0 + 0.5, 0.0, 1.0).astype(np.float32)
 
 
-def load_ply(path: str) -> GaussianCloud:
+def load_ply(path: str, opacity_threshold: float = 0.0) -> GaussianCloud:
     """Load a standard 3DGS PLY file."""
     plydata = PlyData.read(path)
     v = plydata["vertex"]
@@ -52,6 +52,14 @@ def load_ply(path: str) -> GaussianCloud:
     ).astype(np.float32)
     norms = np.linalg.norm(rotations, axis=-1, keepdims=True)
     rotations = rotations / np.maximum(norms, 1e-8)
+
+    if opacity_threshold > 0.0:
+        keep = opacities >= opacity_threshold
+        positions = positions[keep]
+        opacities = opacities[keep]
+        colors    = colors[keep]
+        scales    = scales[keep]
+        rotations = rotations[keep]
 
     return GaussianCloud(
         positions=positions,
