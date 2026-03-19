@@ -1,15 +1,5 @@
 """
-3DGS renderer — numpy projection/sorting + Taichi tile-based rasteriser.
-
-Pipeline:
-  1. Project (numpy, vectorised)        — 3D → 2D centres + covariances
-  2. Depth sort (numpy argsort)          — back → front global order
-  3. Tile list build (numpy, vectorised) — for each tile: sorted list of
-                                           Gaussian indices whose bbox overlaps it
-  4. Rasterise (Taichi, per-pixel)       — each pixel walks only its tile's list
-                                           → O(K) per pixel, K << N
-
-Tile size default: 16×16 pixels.
+Rasterizer
 """
 
 import numpy as np
@@ -17,9 +7,6 @@ import taichi as ti
 
 from argsort import argsort
 from ply_loader import GaussianCloud
-
-# ── camera ────────────────────────────────────────────────────────────────────
-
 
 class Camera:
     def __init__(self, width: int, height: int, fovx: float, c2w: np.ndarray):
@@ -68,9 +55,7 @@ class Camera:
         return Camera(width=width, height=height, fovx=fovx, c2w=c2w)
 
 
-# ── projection helpers ────────────────────────────────────────────────────────
-
-
+# linalg
 def _quat_to_rotmat(q):
     w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
     return np.stack(
@@ -89,11 +74,7 @@ def _quat_to_rotmat(q):
     ).reshape(-1, 3, 3)
 
 
-def _project(cloud: GaussianCloud, cam: Camera):
-    """
-    Returns dict with projected Gaussian data sorted back→front,
-    culled to Gaussians with z < -0.1 (in front of camera).
-    """
+def _project(cloud: GaussianCloud, cam: Camera, M_world: np.ndarray | None = None):
     w2c = cam.w2c.astype(np.float32)
     R = w2c[:3, :3]
     t = w2c[:3, 3]
@@ -103,7 +84,7 @@ def _project(cloud: GaussianCloud, cam: Camera):
     pos_c = cloud.positions @ R.T + t  # (N,3)
     z = pos_c[:, 2]
 
-    # ── cull: behind camera ──────────────────────────────────────────────────
+    # cull
     mask = z < -0.1
     if not mask.any():
         return None
@@ -114,25 +95,28 @@ def _project(cloud: GaussianCloud, cam: Camera):
     sc = cloud.scales[mask]
     rot = cloud.rotations[mask]
 
-    # ── depth sort (front → back) ────────────────────────────────────────────
-    order = argsort((-z).astype(np.float32))  # cast to f32; precision fine for depth
+    # depth sort
+    order = argsort((-z).astype(np.float32))
     pos_c = pos_c[order]
-    z = z[order]
-    op = op[order]
-    col = col[order]
-    sc = sc[order]
-    rot = rot[order]
+    z     = z[order]
+    op    = op[order]
+    col   = col[order]
+    sc    = sc[order]
+    rot   = rot[order]
 
-    # ── project centres ──────────────────────────────────────────────────────
+    # project centers
     inv_z = 1.0 / z
     px = (fx * pos_c[:, 0] * inv_z + cx).astype(np.float32)
     py = (fy * pos_c[:, 1] * inv_z + cy).astype(np.float32)
 
-    # ── 2D covariance ────────────────────────────────────────────────────────
-    Rg = _quat_to_rotmat(rot)
-    S = sc[:, :, None] * np.eye(3)[None]
-    M = Rg @ S
-    cov3w = M @ M.transpose(0, 2, 1)
+    # jacobian
+    if M_world is not None:
+        M_c   = M_world[mask][order]
+        cov3w = M_c @ M_c.transpose(0, 2, 1)
+    else:
+        Rg    = _quat_to_rotmat(rot)
+        M     = Rg * sc[:, None, :]                          # R @ diag(s), all f32
+        cov3w = M @ M.transpose(0, 2, 1)
     cov3c = np.einsum("ij,njk,lk->nil", R, cov3w, R)
 
     xc, yc = pos_c[:, 0], pos_c[:, 1]
@@ -156,7 +140,7 @@ def _project(cloud: GaussianCloud, cam: Camera):
     sq = np.sqrt(np.maximum(0, trace * trace / 4.0 - det))
     radius = np.ceil(3.0 * np.sqrt(np.maximum(trace / 2.0 + sq, 0))).astype(np.int32)
 
-    # ── screen-space cull ────────────────────────────────────────────────────
+    # cull
     on_screen = (
         (px + radius >= 0) & (px - radius < W) & (py + radius >= 0) & (py - radius < H)
     )
@@ -179,9 +163,6 @@ def _project(cloud: GaussianCloud, cam: Camera):
         colors=col,
         opacities=op,
     )
-
-
-# ── tile list builder (vectorised numpy) ──────────────────────────────────────
 
 
 def _build_tile_lists(px, py, radius, W, H, tile_size=16):
@@ -245,9 +226,6 @@ def _build_tile_lists(px, py, radius, W, H, tile_size=16):
     np.cumsum(tile_counts, out=tile_off[1:])
 
     return tile_list, tile_off
-
-
-# ── Taichi rasteriser ─────────────────────────────────────────────────────────
 
 
 @ti.data_oriented
@@ -318,12 +296,16 @@ class GaussianRenderer:
             self.canvas[v, u] = ti.Vector([r + T * bg_r, g + T * bg_g, b + T * bg_b])
 
     def render(
-        self, cloud: GaussianCloud, cam: Camera, bg: np.ndarray | None = None
+        self,
+        cloud: GaussianCloud,
+        cam: Camera,
+        bg: np.ndarray | None = None,
+        M_world: np.ndarray | None = None,
     ) -> np.ndarray:
         if bg is None:
             bg = np.ones(3, dtype=np.float32)
 
-        proj = _project(cloud, cam)
+        proj = _project(cloud, cam, M_world=M_world)
         if proj is None:
             return (np.ones((cam.height, cam.width, 3)) * bg * 255).astype(np.uint8)
 

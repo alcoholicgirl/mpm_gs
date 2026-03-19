@@ -137,8 +137,6 @@ def _to_u32(a: np.ndarray) -> np.ndarray:
     return a.astype(np.uint32)
 
 
-# ── public API ────────────────────────────────────────────────────────────────
-
 def argsort(a: np.ndarray, *, stable: bool = False) -> np.ndarray:
     """Return indices that sort *a* ascending (stable GPU radix sort, 32-bit keys)."""
     _ensure()

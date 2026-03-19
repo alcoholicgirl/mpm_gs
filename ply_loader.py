@@ -33,20 +33,12 @@ def load_ply(path: str, opacity_threshold: float = 0.0) -> GaussianCloud:
     v = plydata["vertex"]
 
     positions = np.stack([v["x"], v["y"], v["z"]], axis=-1).astype(np.float32)
-
-    # Opacity: raw logit → sigmoid
     opacities = _sigmoid(np.array(v["opacity"], dtype=np.float32))
-
-    # DC SH coefficients → RGB
     sh_dc = np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], axis=-1).astype(np.float32)
     colors = _sh_dc_to_rgb(sh_dc)
-
-    # Scale: stored as log → exp
     scales = np.exp(
         np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], axis=-1).astype(np.float32)
     )
-
-    # Rotation quaternion (w, x, y, z)
     rotations = np.stack(
         [v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], axis=-1
     ).astype(np.float32)

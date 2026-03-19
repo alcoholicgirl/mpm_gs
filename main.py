@@ -89,7 +89,8 @@ def main():
             solver.step(n_substeps=args.substeps)
             cloud.positions[:] = solver.get_positions_world()
 
-        img = renderer.render(cloud, cam)
+        M_world = solver.get_deformed_M_world() if solver is not None else None
+        img = renderer.render(cloud, cam, M_world=M_world)
         exporter.write_frame(img)
 
         if frame % 10 == 0:
