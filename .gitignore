@@ -6,3 +6,4 @@ frames/
 .claude
 .venv
 .zsh_history
+_*

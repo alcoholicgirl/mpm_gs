@@ -27,6 +27,12 @@ def parse_args():
     p.add_argument("--fps",      type=int,   default=60)
     p.add_argument("--youngs",   type=float, default=1e5)
     p.add_argument("--poisson",  type=float, default=0.3)
+    p.add_argument("--c2_ratio",   type=float, default=0.0,
+                   help="Mooney-Rivlin C2/(C1+C2) ratio (0=Neo-Hookean, 0.5=equal split)")
+    p.add_argument("--apic_alpha", type=float, default=1.0,
+                   help="APIC blend: 0=pure PIC, 1=full APIC w² weighting")
+    p.add_argument("--deform_render", action="store_true",
+                   help="Apply deformation gradient F to Gaussian covariances during rendering")
     p.add_argument("--gpu",      action="store_true", help="Use Metal/CUDA backend")
     p.add_argument("--no_sim",        action="store_true", help="Render only, skip MPM")
     p.add_argument("--opacity_thresh", type=float, default=0.0,
@@ -77,7 +83,8 @@ def main():
             dt=args.dt,
             youngs_modulus=args.youngs,
             poisson_ratio=args.poisson,
-            
+            c2_ratio=args.c2_ratio,
+            apic_alpha=args.apic_alpha,
         )
         solver.init_from_cloud(cloud, scene_scale=0.8, kernel_scale=args.kernel_scale)
 
@@ -89,7 +96,7 @@ def main():
             solver.step(n_substeps=args.substeps)
             cloud.positions[:] = solver.get_positions_world()
 
-        M_world = solver.get_deformed_M_world() if solver is not None else None
+        M_world = solver.get_deformed_M_world() if (solver is not None and args.deform_render) else None
         img = renderer.render(cloud, cam, M_world=M_world)
         exporter.write_frame(img)
 

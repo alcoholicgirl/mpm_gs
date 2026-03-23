@@ -20,6 +20,8 @@ class MPMSolver:
         rho: float = 1000.0,
         gravity: tuple = (0.0, 0.0, -9.8),
         max_radius: int = 4,
+        c2_ratio: float = 0.0,
+        apic_alpha: float = 1.0,
     ):
         self.n_particles = n_particles
         self.grid_res = grid_res
@@ -27,8 +29,12 @@ class MPMSolver:
         self.rho = rho
         self.max_r = max_radius          # global cap for per-particle max_r
 
-        self.mu_0 = youngs_modulus / (2.0 * (1.0 + poisson_ratio))
-        self.lambda_0 = (
+        mu = youngs_modulus / (2.0 * (1.0 + poisson_ratio))
+        # Mooney-Rivlin: C1 + C2 = mu/2; c2_ratio=0 → pure Neo-Hookean
+        self.C1 = 0.5 * mu * (1.0 - c2_ratio)
+        self.C2 = 0.5 * mu * c2_ratio
+        self.apic_alpha = apic_alpha
+        self.kappa = (
             youngs_modulus
             * poisson_ratio
             / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio))
@@ -38,17 +44,16 @@ class MPMSolver:
         self.inv_dx = float(grid_res)
         self.gravity = ti.Vector(list(gravity), dt=ti.f32)
 
-        # ── particle fields ───────────────────────────────────────────
         self.x       = ti.Vector.field(3,    ti.f32, n_particles)
         self.v       = ti.Vector.field(3,    ti.f32, n_particles)
         self.F       = ti.Matrix.field(3, 3, ti.f32, n_particles)
+        self.C       = ti.Matrix.field(3, 3, ti.f32, n_particles) 
         self.m       = ti.field(ti.f32, n_particles)
         self.V_p     = ti.field(ti.f32, n_particles)
         self.inv_cov = ti.Matrix.field(3, 3, ti.f32, n_particles)
         self.Z_field = ti.field(ti.f32, n_particles)
         self.max_r_field = ti.field(ti.i32, n_particles)   # per-particle stencil radius
 
-        # ── grid fields ───────────────────────────────────────────────
         self.grid_mv = ti.Vector.field(3, ti.f32, shape=(grid_res,) * 3)
         self.grid_m  = ti.field(ti.f32,           shape=(grid_res,) * 3)
 
@@ -73,6 +78,9 @@ class MPMSolver:
         self.v.from_numpy(np.zeros((self.n_particles, 3), np.float32))
         self.F.from_numpy(
             np.tile(np.eye(3, dtype=np.float32), (self.n_particles, 1, 1))
+        )
+        self.C.from_numpy(
+            np.zeros((self.n_particles, 3, 3), dtype=np.float32)
         )
 
         self._scene_offset     = scene_offset
@@ -135,13 +143,6 @@ class MPMSolver:
         return pos
 
     def get_deformed_M_world(self) -> np.ndarray:
-        """
-        Return M_deformed = F @ M for each particle (N, 3, 3).
-        F_grid == F_world because the world→grid transform is a uniform scale
-        (the scale factor cancels in the deformation gradient ratio).
-        Pass the result to GaussianRenderer.render() as M_world to make
-        the rendered covariances reflect the current deformation state.
-        """
         F = self.F.to_numpy()
         return np.einsum("nij,njk->nik", F, self._M0_world)
 
@@ -159,12 +160,16 @@ class MPMSolver:
             mr  = self.max_r_field[p]
             base = ti.cast(xp * self.inv_dx, ti.i32)
 
-            # Neo-Hookean Kirchhoff stress
+            # Mooney-Rivlin Kirchhoff stress
+            # τ = 2C1(b−I) + 2C2(I1·b − b² − 2I) + κ·ln(J)·I
             Fp  = self.F[p]
             J   = ti.max(Fp.determinant(), 0.01)
             b   = Fp @ Fp.transpose()
-            stress = (self.mu_0 * (b - ti.Matrix.identity(ti.f32, 3))
-                      + self.lambda_0 * ti.log(J) * ti.Matrix.identity(ti.f32, 3))
+            I1  = b.trace()
+            eye = ti.Matrix.identity(ti.f32, 3)
+            stress = (2.0 * self.C1 * (b - eye)
+                      + 2.0 * self.C2 * (I1 * b - b @ b - 2.0 * eye)
+                      + self.kappa * ti.log(J) * eye)
 
             # normalisation Z  (per-particle stencil radius)
             Z = 0.0
@@ -194,7 +199,7 @@ class MPMSolver:
                                 if maha <= 9.0:
                                     w = ti.exp(-0.5 * maha) / Z
                                     self.grid_mv[cell] += (
-                                        w * self.m[p] * self.v[p]
+                                        w * self.m[p] * self.v[p] + self.apic_alpha * w * w * self.m[p] * self.C[p] @ d
                                         - self.dt * self.V_p[p] * w * stress @ (ic @ d)
                                     )
                                     self.grid_m[cell] += w * self.m[p]
@@ -243,8 +248,9 @@ class MPMSolver:
                                     new_v  += w * gv
                                     grad_v += w * gv.outer_product(ic @ d)
 
+            self.C[p] = grad_v
             self.v[p] = new_v
-            self.F[p] = (ti.Matrix.identity(ti.f32, 3) + self.dt * grad_v) @ self.F[p]
+            self.F[p] = (ti.Matrix.identity(ti.f32, 3) + self.dt * self.C[p]) @ self.F[p]
 
             # clamp singular values
             svd_u, svd_s, svd_v = ti.svd(self.F[p])

@@ -1,6 +1,6 @@
 A GPU-accelerated [Material Point Method](https://en.wikipedia.org/wiki/Material_point_method) (MPM) simulator.
 
-The hyperelastic model governing the constitution model can be chosen as desired. By default it's Neo-Hookean.
+The hyperelastic model governing the constitution model can be chosen as desired. By default it's Mooney-Rivlin.
 
 Gi(x) stands the gaussian value for i-th ellipsoid at x.
 
