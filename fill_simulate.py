@@ -26,6 +26,8 @@ def parse_args():
     p.add_argument("--width", type=int, default=640)
     p.add_argument("--height", type=int, default=480)
     p.add_argument("--fovx_deg", type=float, default=60.0)
+    p.add_argument("--bg_rgba", type=float, nargs=4, default=(1.0, 1.0, 1.0, 1.0))
+    p.add_argument("--object_scale", type=float, default=0.8)
     p.add_argument("--out_dir", type=str, default="frames_fill_sim")
     p.add_argument("--video", type=str, default="fill_sim.mp4")
     p.add_argument("--fps", type=int, default=60)
@@ -102,6 +104,7 @@ def main():
     print(f"Generated interior: {len(interior)} gaussians")
     print(f"Simulating total: {len(cloud)} gaussians")
 
+    bg = np.asarray(args.bg_rgba, dtype=np.float32)
     cam = make_scene_camera(shell, args.width, args.height, args.fovx_deg)
     renderer = GaussianRenderer(args.width, args.height, max_gaussians=len(cloud))
     solver = MPMSolver(
@@ -114,20 +117,20 @@ def main():
         floor_friction=args.floor_friction,
         boundary_thickness=args.boundary_thickness,
     )
-    solver.init_from_cloud(cloud, scene_scale=0.8)
+    solver.init_from_cloud(cloud, scene_scale=args.object_scale)
     exporter = VideoExporter(out_dir=args.out_dir, fps=args.fps)
 
     for frame in range(args.frames):
         solver.step(n_substeps=args.substeps)
         cloud.positions[:] = solver.get_positions_world()
         M_world = solver.get_deformed_M_world() if args.deform_render else None
-        img = renderer.render(cloud, cam, M_world=M_world)
+        img = renderer.render(cloud, cam, bg=bg, M_world=M_world)
         exporter.write_frame(img)
         if frame % 10 == 0:
             print(f"  Frame {frame}/{args.frames}")
 
     if args.video:
-        exporter.compile_video(args.video)
+        exporter.compile_video(args.video, bg_rgb=tuple(bg[:3]))
 
     summary_path = Path(args.out_dir) / "fill_summary.txt"
     summary_path.write_text(

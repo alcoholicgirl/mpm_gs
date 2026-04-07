@@ -254,7 +254,7 @@ class GaussianRenderer:
         # (no recompilation needed when M changes)
         self.t_tile_off = ti.field(ti.i32, self.n_tiles + 1)
 
-        self.canvas = ti.Vector.field(3, ti.f32, (height, width))
+        self.canvas = ti.Vector.field(4, ti.f32, (height, width))
 
     @ti.kernel
     def _rasterise(
@@ -263,6 +263,7 @@ class GaussianRenderer:
         bg_r: ti.f32,
         bg_g: ti.f32,
         bg_b: ti.f32,
+        bg_a: ti.f32,
     ):
         ts = ti.static(self.tile_size)
         for v, u in self.canvas:
@@ -270,7 +271,7 @@ class GaussianRenderer:
             start = self.t_tile_off[tile_id]
             end = self.t_tile_off[tile_id + 1]
             T = 1.0
-            r = g = b = 0.0
+            r = g = b = 0.0  # premultiplied foreground accumulation
             uf = ti.cast(u, ti.f32)
             vf = ti.cast(v, ti.f32)
             for k in range(start, end):
@@ -293,7 +294,19 @@ class GaussianRenderer:
                 T *= 1.0 - alpha
                 if T < 1e-4:
                     break
-            self.canvas[v, u] = ti.Vector([r + T * bg_r, g + T * bg_g, b + T * bg_b])
+            alpha_out = 1.0 - T * (1.0 - bg_a)
+            premul_r = r + T * bg_a * bg_r
+            premul_g = g + T * bg_a * bg_g
+            premul_b = b + T * bg_a * bg_b
+            out_r = 0.0
+            out_g = 0.0
+            out_b = 0.0
+            if alpha_out > 1e-6:
+                inv_alpha = 1.0 / alpha_out
+                out_r = premul_r * inv_alpha
+                out_g = premul_g * inv_alpha
+                out_b = premul_b * inv_alpha
+            self.canvas[v, u] = ti.Vector([out_r, out_g, out_b, alpha_out])
 
     def render(
         self,
@@ -303,11 +316,16 @@ class GaussianRenderer:
         M_world: np.ndarray | None = None,
     ) -> np.ndarray:
         if bg is None:
-            bg = np.ones(3, dtype=np.float32)
+            bg = np.ones(4, dtype=np.float32)
+        bg = np.asarray(bg, dtype=np.float32)
+        if bg.shape[0] == 3:
+            bg = np.concatenate([bg, np.ones(1, dtype=np.float32)])
 
         proj = _project(cloud, cam, M_world=M_world)
         if proj is None:
-            return (np.ones((cam.height, cam.width, 3)) * bg * 255).astype(np.uint8)
+            blank = np.ones((cam.height, cam.width, 4), dtype=np.float32)
+            blank *= bg[None, None, :]
+            return (blank.clip(0, 1) * 255).astype(np.uint8)
 
         px, py = proj["px"], proj["py"]
         ic_a = proj["ic_a"]
@@ -343,6 +361,6 @@ class GaussianRenderer:
 
         # tile_list passed as ndarray → no pre-allocation needed
         tl = np.ascontiguousarray(tile_list.astype(np.int32))
-        self._rasterise(tl, float(bg[0]), float(bg[1]), float(bg[2]))
+        self._rasterise(tl, float(bg[0]), float(bg[1]), float(bg[2]), float(bg[3]))
 
         return (self.canvas.to_numpy().clip(0, 1) * 255).astype(np.uint8)

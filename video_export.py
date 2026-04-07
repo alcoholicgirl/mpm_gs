@@ -14,15 +14,14 @@ class VideoExporter:
         self._frame_idx = 0
 
     def write_frame(self, img: np.ndarray):
-        """img: (H, W, 3) uint8"""
+        """img: (H, W, 3|4) uint8"""
         path = self.out_dir / f"frame_{self._frame_idx:05d}.png"
         Image.fromarray(img).save(str(path))
         self._frame_idx += 1
 
-    def compile_video(self, output_path: str = "output.mp4") -> str:
+    def compile_video(self, output_path: str = "output.mp4", bg_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)) -> str:
         """Compile saved PNG frames into an MP4 using imageio-ffmpeg."""
         import imageio
-        pattern = str(self.out_dir / "frame_%05d.png")
         # Build sorted frame list
         frames = sorted(self.out_dir.glob("frame_*.png"))
         if not frames:
@@ -30,8 +29,14 @@ class VideoExporter:
         writer = imageio.get_writer(output_path, fps=self.fps, codec="libx264",
                                     quality=8, pixelformat="yuv420p",
                                     macro_block_size=1)
+        bg = (np.clip(np.asarray(bg_rgb, dtype=np.float32), 0.0, 1.0) * 255.0).astype(np.float32)
         for f in frames:
-            writer.append_data(np.array(Image.open(f)))
+            arr = np.array(Image.open(f))
+            if arr.ndim == 3 and arr.shape[2] == 4:
+                alpha = arr[..., 3:4].astype(np.float32) / 255.0
+                rgb = arr[..., :3].astype(np.float32)
+                arr = np.round(rgb * alpha + bg[None, None, :] * (1.0 - alpha)).astype(np.uint8)
+            writer.append_data(arr)
         writer.close()
         print(f"Video saved to {output_path}  ({len(frames)} frames @ {self.fps} fps)")
         return output_path

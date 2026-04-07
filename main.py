@@ -24,6 +24,11 @@ def parse_args():
     p.add_argument("--width",    type=int,   default=800)
     p.add_argument("--height",   type=int,   default=600)
     p.add_argument("--fovx_deg", type=float, default=60.0)
+    p.add_argument("--bg_rgba",  type=float, nargs=4, default=(1.0, 1.0, 1.0, 1.0),
+                   metavar=("R", "G", "B", "A"),
+                   help="Background color and alpha in 0..1")
+    p.add_argument("--object_scale", type=float, default=0.8,
+                   help="Relative size of the object inside the normalized simulation box")
     p.add_argument("--out_dir",  type=str,   default="frames")
     p.add_argument("--video",    type=str,   default=None)
     p.add_argument("--fps",      type=int,   default=60)
@@ -76,6 +81,7 @@ def main():
     cloud = load_ply(args.ply, opacity_threshold=args.opacity_thresh)
     print(f"  {len(cloud)} Gaussians" +
           (f"  (opacity ≥ {args.opacity_thresh})" if args.opacity_thresh > 0 else ""))
+    bg = np.asarray(args.bg_rgba, dtype=np.float32)
     cam = make_scene_camera(cloud, args.width, args.height, args.fovx_deg)
     renderer = GaussianRenderer(args.width, args.height, max_gaussians=len(cloud))
 
@@ -92,7 +98,7 @@ def main():
             floor_friction=args.floor_friction,
             boundary_thickness=args.boundary_thickness,
         )
-        solver.init_from_cloud(cloud, scene_scale=0.8, kernel_scale=args.kernel_scale)
+        solver.init_from_cloud(cloud, scene_scale=args.object_scale, kernel_scale=args.kernel_scale)
 
     exporter = VideoExporter(out_dir=args.out_dir, fps=args.fps)
 
@@ -103,7 +109,7 @@ def main():
             cloud.positions[:] = solver.get_positions_world()
 
         M_world = solver.get_deformed_M_world() if (solver is not None and args.deform_render) else None
-        img = renderer.render(cloud, cam, M_world=M_world)
+        img = renderer.render(cloud, cam, bg=bg, M_world=M_world)
         exporter.write_frame(img)
 
         if frame % 10 == 0:
@@ -112,7 +118,7 @@ def main():
     print("Done.")
 
     if args.video:
-        exporter.compile_video(args.video)
+        exporter.compile_video(args.video, bg_rgb=tuple(bg[:3]))
 
 
 if __name__ == "__main__":
