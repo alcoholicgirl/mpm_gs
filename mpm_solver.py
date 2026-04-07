@@ -19,21 +19,19 @@ class MPMSolver:
         poisson_ratio: float = 0.3,
         rho: float = 1000.0,
         gravity: tuple = (0.0, 0.0, -9.8),
-        max_radius: int = 4,
+        max_radius: int = 0,
         c2_ratio: float = 0.0,
-        apic_alpha: float = 1.0,
     ):
         self.n_particles = n_particles
         self.grid_res = grid_res
         self.dt = dt
         self.rho = rho
-        self.max_r = max_radius          # global cap for per-particle max_r
+        self.max_r_cap = max_radius      # 0 means adaptive / uncapped
 
         mu = youngs_modulus / (2.0 * (1.0 + poisson_ratio))
         # Mooney-Rivlin: C1 + C2 = mu/2; c2_ratio=0 → pure Neo-Hookean
         self.C1 = 0.5 * mu * (1.0 - c2_ratio)
         self.C2 = 0.5 * mu * c2_ratio
-        self.apic_alpha = apic_alpha
         self.kappa = (
             youngs_modulus
             * poisson_ratio
@@ -119,10 +117,14 @@ class MPMSolver:
         V_arr = (TWO_PI_32 * s[:, 0] * s[:, 1] * s[:, 2]).astype(np.float32)
         m_arr = (self.rho * V_arr * cloud.opacities).astype(np.float32)
 
-        # per-particle stencil radius: ceil(3σ_max / dx), capped at self.max_r
+        # per-particle stencil radius: ceil(3σ_max / dx). By default this is
+        # fully adaptive; an optional global cap can still be applied for
+        # performance experiments.
         sigma_max  = s.max(axis=1)                                         # grid space
         max_r_arr  = np.ceil(3.0 * sigma_max * self.inv_dx).astype(np.int32)
-        max_r_arr  = np.clip(max_r_arr, 1, self.max_r).astype(np.int32)
+        max_r_arr  = np.maximum(max_r_arr, 1).astype(np.int32)
+        if self.max_r_cap > 0:
+            max_r_arr = np.minimum(max_r_arr, self.max_r_cap).astype(np.int32)
 
         self.inv_cov.from_numpy(inv_cov)
         self.V_p.from_numpy(V_arr)
@@ -199,7 +201,7 @@ class MPMSolver:
                                 if maha <= 9.0:
                                     w = ti.exp(-0.5 * maha) / Z
                                     self.grid_mv[cell] += (
-                                        w * self.m[p] * self.v[p] + self.apic_alpha * w * w * self.m[p] * self.C[p] @ d
+                                        w * self.m[p] * (self.v[p] + self.C[p] @ d)
                                         - self.dt * self.V_p[p] * w * stress @ (ic @ d)
                                     )
                                     self.grid_m[cell] += w * self.m[p]
@@ -229,10 +231,13 @@ class MPMSolver:
             base = ti.cast(xp * self.inv_dx, ti.i32)
             Z   = self.Z_field[p]
 
-            new_v  = ti.Vector.zero(ti.f32, 3)
-            grad_v = ti.Matrix.zero(ti.f32, 3, 3)
+            mean_v = ti.Vector.zero(ti.f32, 3)
+            mean_d = ti.Vector.zero(ti.f32, 3)
+            wsum   = 0.0
+            C_p    = ti.Matrix.zero(ti.f32, 3, 3)
 
             if Z > 1e-12:
+                # First pass: weighted means for the local affine MLS fit
                 for di in range(2 * mr + 1):
                     for dj in range(2 * mr + 1):
                         for dk in range(2 * mr + 1):
@@ -245,10 +250,43 @@ class MPMSolver:
                                 if maha <= 9.0:
                                     w  = ti.exp(-0.5 * maha) / Z
                                     gv = self.grid_mv[cell]
-                                    new_v  += w * gv
-                                    grad_v += w * gv.outer_product(ic @ d)
+                                    wsum   += w
+                                    mean_v += w * gv
+                                    mean_d += w * d
 
-            self.C[p] = grad_v
+                if wsum > 1e-12:
+                    mean_v /= wsum
+                    mean_d /= wsum
+
+                    cov_vd = ti.Matrix.zero(ti.f32, 3, 3)
+                    cov_dd = ti.Matrix.zero(ti.f32, 3, 3)
+
+                    # Second pass: solve for the best affine map over the
+                    # actual discrete stencil instead of using the continuous
+                    # Gaussian gradient as a proxy.
+                    for di in range(2 * mr + 1):
+                        for dj in range(2 * mr + 1):
+                            for dk in range(2 * mr + 1):
+                                cell = base + ti.Vector([di - mr, dj - mr, dk - mr])
+                                if (0 <= cell[0] < self.grid_res
+                                        and 0 <= cell[1] < self.grid_res
+                                        and 0 <= cell[2] < self.grid_res):
+                                    d    = ti.cast(cell, ti.f32) * self.dx - xp
+                                    maha = d.dot(ic @ d)
+                                    if maha <= 9.0:
+                                        w  = ti.exp(-0.5 * maha) / Z
+                                        gv = self.grid_mv[cell]
+                                        dd = d - mean_d
+                                        dv = gv - mean_v
+                                        cov_vd += w * dv.outer_product(dd)
+                                        cov_dd += w * dd.outer_product(dd)
+
+                    reg = 1e-6 * ti.max(cov_dd.trace(), self.dx * self.dx)
+                    cov_dd += reg * ti.Matrix.identity(ti.f32, 3)
+                    C_p = cov_vd @ cov_dd.inverse()
+
+            new_v = mean_v - C_p @ mean_d
+            self.C[p] = C_p
             self.v[p] = new_v
             self.F[p] = (ti.Matrix.identity(ti.f32, 3) + self.dt * self.C[p]) @ self.F[p]
 

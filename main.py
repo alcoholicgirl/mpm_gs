@@ -19,6 +19,8 @@ def parse_args():
     p.add_argument("--substeps", type=int,   default=20)
     p.add_argument("--dt",       type=float, default=2e-4)
     p.add_argument("--grid_res", type=int,   default=128)
+    p.add_argument("--max_radius", type=int, default=0,
+                   help="Gaussian support radius cap in grid cells; 0 means fully adaptive support")
     p.add_argument("--width",    type=int,   default=800)
     p.add_argument("--height",   type=int,   default=600)
     p.add_argument("--fovx_deg", type=float, default=60.0)
@@ -29,8 +31,6 @@ def parse_args():
     p.add_argument("--poisson",  type=float, default=0.3)
     p.add_argument("--c2_ratio",   type=float, default=0.0,
                    help="Mooney-Rivlin C2/(C1+C2) ratio (0=Neo-Hookean, 0.5=equal split)")
-    p.add_argument("--apic_alpha", type=float, default=1.0,
-                   help="APIC blend: 0=pure PIC, 1=full APIC w² weighting")
     p.add_argument("--deform_render", action="store_true",
                    help="Apply deformation gradient F to Gaussian covariances during rendering")
     p.add_argument("--gpu",      action="store_true", help="Use Metal/CUDA backend")
@@ -83,8 +83,8 @@ def main():
             dt=args.dt,
             youngs_modulus=args.youngs,
             poisson_ratio=args.poisson,
+            max_radius=args.max_radius,
             c2_ratio=args.c2_ratio,
-            apic_alpha=args.apic_alpha,
         )
         solver.init_from_cloud(cloud, scene_scale=0.8, kernel_scale=args.kernel_scale)
 
