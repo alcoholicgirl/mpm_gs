@@ -39,6 +39,10 @@ def parse_args():
                    help="Discard Gaussians with opacity below this value (0–1)")
     p.add_argument("--kernel_scale",  type=float, default=1.0,
                    help="Sim kernel size relative to render kernel (0–1, smaller → less phantom collision)")
+    p.add_argument("--floor_friction", type=float, default=0.0,
+                   help="Coulomb-style friction coefficient applied on the bottom floor (z-min boundary)")
+    p.add_argument("--boundary_thickness", type=float, default=4.0 / 64.0,
+                   help="World-space thickness of the box collision boundary in normalized simulation space")
     return p.parse_args()
 
 
@@ -85,6 +89,8 @@ def main():
             poisson_ratio=args.poisson,
             max_radius=args.max_radius,
             c2_ratio=args.c2_ratio,
+            floor_friction=args.floor_friction,
+            boundary_thickness=args.boundary_thickness,
         )
         solver.init_from_cloud(cloud, scene_scale=0.8, kernel_scale=args.kernel_scale)
 

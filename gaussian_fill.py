@@ -8,11 +8,11 @@ The implementation is designed as a practical baseline:
 
 1. Load a 3DGS PLY with full SH coefficients.
 2. Bake a Gaussian density field onto a voxel grid.
-3. Threshold the density to get an occupied volume.
-4. Extract a boundary voxel shell.
-5. Bake boundary SH coefficients onto that shell.
-6. Solve Laplace equations inside the occupied region.
-7. Sample isotropic interior Gaussians from the filled volume.
+3. Threshold and morphologically close the shell support.
+4. Flood-fill exterior empty voxels to recover the enclosed cavity.
+5. Bake boundary SH coefficients on shell voxels touching that cavity.
+6. Solve Laplace equations inside the cavity.
+7. Sample isotropic interior Gaussians from the cavity volume.
 
 The harmonic extension is carried out independently per SH coefficient/channel.
 This keeps the appearance pipeline simple: the boundary provides Dirichlet
@@ -21,6 +21,7 @@ values, and the interior receives a smooth continuation of the same SH basis.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -103,9 +104,11 @@ class FillResult:
     interior_cloud: GaussianSHCloud
     grid: VoxelGrid
     density: np.ndarray          # (nx, ny, nz) float32
-    occupancy: np.ndarray        # (nx, ny, nz) bool
-    boundary_mask: np.ndarray    # (nx, ny, nz) bool
-    depth_voxels: np.ndarray     # (nx, ny, nz) int32
+    occupancy: np.ndarray        # (nx, ny, nz) bool, thresholded shell support
+    shell_mask: np.ndarray       # (nx, ny, nz) bool, post-processed shell mask
+    interior_mask: np.ndarray    # (nx, ny, nz) bool, enclosed empty cavity
+    boundary_mask: np.ndarray    # (nx, ny, nz) bool, shell voxels adjacent to cavity
+    depth_voxels: np.ndarray     # (nx, ny, nz) int32, cavity depth from shell
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -278,11 +281,55 @@ def close6(mask: np.ndarray, iters: int = 1) -> np.ndarray:
     return out
 
 
-def extract_boundary_mask(occupancy: np.ndarray) -> np.ndarray:
-    """Return the occupied one-voxel shell adjacent to empty space."""
+def flood_fill_outside(shell_mask: np.ndarray) -> np.ndarray:
+    """Mark empty voxels connected to the grid boundary."""
 
-    interior = erode6(occupancy)
-    return occupancy & ~interior
+    shape = shell_mask.shape
+    outside = np.zeros(shape, dtype=bool)
+    q: deque[tuple[int, int, int]] = deque()
+
+    def enqueue_if_empty(i: int, j: int, k: int) -> None:
+        if shell_mask[i, j, k] or outside[i, j, k]:
+            return
+        outside[i, j, k] = True
+        q.append((i, j, k))
+
+    nx, ny, nz = shape
+    for i in range(nx):
+        for j in range(ny):
+            enqueue_if_empty(i, j, 0)
+            enqueue_if_empty(i, j, nz - 1)
+    for i in range(nx):
+        for k in range(nz):
+            enqueue_if_empty(i, 0, k)
+            enqueue_if_empty(i, ny - 1, k)
+    for j in range(ny):
+        for k in range(nz):
+            enqueue_if_empty(0, j, k)
+            enqueue_if_empty(nx - 1, j, k)
+
+    nbrs = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+    while q:
+        i, j, k = q.popleft()
+        for di, dj, dk in nbrs:
+            ni, nj, nk = i + di, j + dj, k + dk
+            if not (0 <= ni < nx and 0 <= nj < ny and 0 <= nk < nz):
+                continue
+            if shell_mask[ni, nj, nk] or outside[ni, nj, nk]:
+                continue
+            outside[ni, nj, nk] = True
+            q.append((ni, nj, nk))
+
+    return outside
+
+
+def extract_enclosed_void(shell_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return enclosed empty voxels and the shell voxels touching that cavity."""
+
+    outside = flood_fill_outside(shell_mask)
+    interior_void = (~shell_mask) & (~outside)
+    cavity_boundary = shell_mask & dilate6(interior_void)
+    return interior_void, cavity_boundary
 
 
 def bake_boundary_sh(
@@ -346,7 +393,7 @@ def bake_boundary_sh(
 
 
 def solve_harmonic_scalar(
-    occupancy: np.ndarray,
+    domain_mask: np.ndarray,
     boundary_mask: np.ndarray,
     boundary_indices: np.ndarray,
     boundary_values: np.ndarray,
@@ -355,13 +402,13 @@ def solve_harmonic_scalar(
 ) -> np.ndarray:
     """Solve a scalar harmonic extension with Dirichlet boundary conditions."""
 
-    field = np.zeros(occupancy.shape, dtype=np.float32)
+    field = np.zeros(domain_mask.shape, dtype=np.float32)
     field[boundary_indices[:, 0], boundary_indices[:, 1], boundary_indices[:, 2]] = boundary_values
-    interior_mask = occupancy & ~boundary_mask
+    interior_mask = domain_mask & ~boundary_mask
     if not np.any(interior_mask):
         return field
 
-    occ = occupancy.astype(np.float32)
+    occ = domain_mask.astype(np.float32)
     occ_pad = np.pad(occ, 1)
     deg = (
         occ_pad[:-2, 1:-1, 1:-1]
@@ -395,11 +442,11 @@ def solve_harmonic_scalar(
     return field
 
 
-def depth_from_boundary(occupancy: np.ndarray) -> np.ndarray:
+def depth_from_boundary(mask: np.ndarray) -> np.ndarray:
     """Approximate voxel depth by iterative 6-neighborhood erosion layers."""
 
-    depth = -np.ones(occupancy.shape, dtype=np.int32)
-    active = occupancy.copy()
+    depth = -np.ones(mask.shape, dtype=np.int32)
+    active = mask.copy()
     layer = 0
     while np.any(active):
         shell = active & ~erode6(active)
@@ -411,15 +458,14 @@ def depth_from_boundary(occupancy: np.ndarray) -> np.ndarray:
 
 def sample_interior_gaussians(
     grid: VoxelGrid,
-    occupancy: np.ndarray,
-    boundary_mask: np.ndarray,
+    interior_mask: np.ndarray,
     depth_voxels: np.ndarray,
     sampled_sh: np.ndarray,
     config: FillConfig,
 ) -> GaussianSHCloud:
-    """Convert occupied interior voxels into isotropic interior Gaussians."""
+    """Convert enclosed interior voxels into isotropic interior Gaussians."""
 
-    candidate_mask = occupancy & ~boundary_mask & (depth_voxels >= config.min_fill_depth_voxels)
+    candidate_mask = interior_mask & (depth_voxels >= config.min_fill_depth_voxels)
     indices = np.argwhere(candidate_mask)
     if len(indices) == 0:
         return GaussianSHCloud(
@@ -450,7 +496,7 @@ def sample_interior_gaussians(
 
 
 def harmonic_extend_sh_to_points(
-    occupancy: np.ndarray,
+    domain_mask: np.ndarray,
     boundary_mask: np.ndarray,
     boundary: BoundarySH,
     sample_indices: np.ndarray,
@@ -471,7 +517,7 @@ def harmonic_extend_sh_to_points(
             decay.fill(1.0)
         for rgb_idx in range(3):
             scalar_field = solve_harmonic_scalar(
-                occupancy=occupancy,
+                domain_mask=domain_mask,
                 boundary_mask=boundary_mask,
                 boundary_indices=boundary.indices,
                 boundary_values=boundary.sh_coeffs[:, coeff_idx, rgb_idx],
@@ -493,16 +539,17 @@ def build_filled_interior(
     grid = infer_cubic_grid(cloud, resolution=config.grid_resolution, support_sigmas=config.support_sigmas)
     density = bake_density_grid(cloud, grid, support_sigmas=config.support_sigmas)
     occupancy = density >= config.density_threshold
+    shell_mask = occupancy.copy()
     if config.close_iters > 0:
-        occupancy = close6(occupancy, iters=config.close_iters)
-    boundary_mask = extract_boundary_mask(occupancy)
+        shell_mask = close6(shell_mask, iters=config.close_iters)
+    interior_mask, boundary_mask = extract_enclosed_void(shell_mask)
     boundary = bake_boundary_sh(cloud, grid, boundary_mask, support_sigmas=config.support_sigmas)
-    depth = depth_from_boundary(occupancy)
+    depth = depth_from_boundary(interior_mask)
 
-    sample_mask = occupancy & ~boundary_mask & (depth >= config.min_fill_depth_voxels)
+    sample_mask = interior_mask & (depth >= config.min_fill_depth_voxels)
     sample_indices = np.argwhere(sample_mask)
     sampled_sh = harmonic_extend_sh_to_points(
-        occupancy=occupancy,
+        domain_mask=interior_mask | boundary_mask,
         boundary_mask=boundary_mask,
         boundary=boundary,
         sample_indices=sample_indices,
@@ -511,8 +558,7 @@ def build_filled_interior(
     )
     interior_cloud = sample_interior_gaussians(
         grid=grid,
-        occupancy=occupancy,
-        boundary_mask=boundary_mask,
+        interior_mask=interior_mask,
         depth_voxels=depth,
         sampled_sh=sampled_sh,
         config=config,
@@ -522,6 +568,8 @@ def build_filled_interior(
         grid=grid,
         density=density,
         occupancy=occupancy,
+        shell_mask=shell_mask,
+        interior_mask=interior_mask,
         boundary_mask=boundary_mask,
         depth_voxels=depth,
     )
@@ -536,7 +584,7 @@ __all__ = [
     "bake_boundary_sh",
     "bake_density_grid",
     "build_filled_interior",
-    "extract_boundary_mask",
+    "extract_enclosed_void",
     "harmonic_extend_sh_to_points",
     "infer_cubic_grid",
     "load_ply_with_sh",

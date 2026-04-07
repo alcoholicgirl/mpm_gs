@@ -32,6 +32,8 @@ def parse_args():
     p.add_argument("--youngs", type=float, default=1e5)
     p.add_argument("--poisson", type=float, default=0.3)
     p.add_argument("--c2_ratio", type=float, default=0.0)
+    p.add_argument("--floor_friction", type=float, default=0.0)
+    p.add_argument("--boundary_thickness", type=float, default=4.0 / 64.0)
     p.add_argument("--gpu", action="store_true")
     p.add_argument("--deform_render", action="store_true")
     p.add_argument("--fill_grid", type=int, default=64)
@@ -94,6 +96,9 @@ def main():
     cloud = merge_clouds(shell, interior, args.fill_only)
 
     print(f"Loaded shell: {len(shell)} gaussians")
+    print(f"Shell voxels (raw/closed): {int(fill_result.occupancy.sum())} / {int(fill_result.shell_mask.sum())}")
+    print(f"Cavity boundary voxels: {int(fill_result.boundary_mask.sum())}")
+    print(f"Interior cavity voxels: {int(fill_result.interior_mask.sum())}")
     print(f"Generated interior: {len(interior)} gaussians")
     print(f"Simulating total: {len(cloud)} gaussians")
 
@@ -106,6 +111,8 @@ def main():
         youngs_modulus=args.youngs,
         poisson_ratio=args.poisson,
         c2_ratio=args.c2_ratio,
+        floor_friction=args.floor_friction,
+        boundary_thickness=args.boundary_thickness,
     )
     solver.init_from_cloud(cloud, scene_scale=0.8)
     exporter = VideoExporter(out_dir=args.out_dir, fps=args.fps)
@@ -127,6 +134,10 @@ def main():
         "\n".join(
             [
                 f"shell_gaussians={len(shell)}",
+                f"shell_voxels_raw={int(fill_result.occupancy.sum())}",
+                f"shell_voxels_closed={int(fill_result.shell_mask.sum())}",
+                f"boundary_voxels={int(fill_result.boundary_mask.sum())}",
+                f"interior_voxels={int(fill_result.interior_mask.sum())}",
                 f"interior_gaussians={len(interior)}",
                 f"total_gaussians={len(cloud)}",
                 f"fill_grid={args.fill_grid}",
